@@ -47,7 +47,7 @@ $processFiles_block = {
                 Add-Content $log "## Filelist or output missing in $filelistParent, generating filelist..."
                 Get-ChildItem -Path "$filelistParent" | Where-Object {$_.FullName -like '*.mp4' } | Where-Object {$_.FullName -notlike 'output*'} | ForEach-Object { "file '" + $_.FullName + "'" } | Out-File -encoding ASCII "$FilelistPath"
                 Add-Content $log "## FFMPEG called to concatinate the filelist to $outputPath..."
-                Invoke-Expression "'$ffmpeg' -loglevel panic -f concat -safe 0 -i '$Filelistpath' -c copy '$outputPath'"
+                Invoke-Expression "$ffmpeg -loglevel panic -f concat -safe 0 -i '$Filelistpath' -c copy '$outputPath'"
                 echo $null >> $checkfile                
                 }
             }
