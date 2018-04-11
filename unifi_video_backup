@@ -1,0 +1,145 @@
+#
+#   Backup to network and prune old local files script
+#   --------------------------------------------------
+#   Takes UniFi Video CCTV sources and concatenates them into an output file for playback.
+#   UniFi Video source video is segmented into 5MB MP4 segments with limited tooling to export it automatically for backup.
+#   Due to the fragmented nature of the source videos and being unable to seek the days' video this script was implemented.
+#   
+#   Optionally enable copy resulting files to a destination location, either including the source files or not.
+#   NOTE: Assumes ASCII compliant structures, try not to use unicode in the CCTV path
+#
+
+Param(
+# Paths
+    [string]$basesrc ="D:\cctv", # Source folder of CCTV
+    [string]$basedst = "Y:\cctv\", # Destination folder
+    [string]$logdir = "C:\backuplogs", # Log folder
+    [string]$ffmpeg = "C:\ffmpeg.exe", # Path to ffmpeg.exe 
+# Flags
+    [bool]$concat = $false, # Enable or disable concat with ffmpeg video output
+    [bool]$backup = $false, # If set to false, only create ffmpeg output files
+    [bool]$outputonly = $false, # Copy source and output files to destination or just the ffmpeg output
+    [bool]$delete = $true, # Enable or disable deletion of files marked older than above
+# Variables
+    [int]$threads = "4", # Robocopy threadcount for copying (default is 8 for /MT copies, 2 prevents large file stalling, only use above 8 for local drives)
+    [int]$days = "5", # Delete files older than this variable 
+    [string]$output_prefix = "output" # Filename prefix for the concatinated video to be used to copy 
+)
+
+Set-Location -Path $PSScriptRoot
+$process = Get-Process -Id $pid
+$process.PriorityClass = 'Idle' # Set process as lowest cpu priority, backup tasks are a lower priority than writing new data to disk
+
+filter timestamp {"$(Get-Date -Format G): $_"}
+
+# Initialise log at defined logpath
+$log = Join-Path $logdir "backup_$(get-date -f yyyy-MM-dd_HH-mm-ss).log"
+New-Item -Force $log | Out-Null
+
+Add-Content $log "###### Starting backup script ######"
+Add-Content $log "$(Get-Date)"
+Add-Content $log "Concatenation of $basesrc files = $concat`r`nBackup of files to destination ($basedst) = $backup`r`nBackup only concatenated video output = $outputonly`r`nDelete older files after $days = $delete`r`n"
+
+# Execute ffmpeg command using the filelist generated after some lengthy if loop checks
+# First check for directories that haven't by modified in the last hour, this is to prevent partial CCTV recordings from being processed as it should be constantly written to till end of the day
+# Then build a bunch of variables from each directory found that is applicable
+# Then check for a checkfile, this is added at the end of the loop to skip on next run of the script (delete .complete to re-run a directory and wait an hour or change modified time of the directory)
+# Then check if the directory has mp4 files in (with wildcard format), if so, enter directory
+# Then check for a filelist and output video, if both are missing, produce a file list in ffmpeg compatible syntax and pass it to ffmpeg to process, logging is suppressed as ffmpeg is noisy and 9000+ source files slow it down
+# This process is timed so you can get a feeling for how long each day will take to concatenate - I get approximately 1GB of footage processed per minute.
+
+$processFiles_block = {
+    param($basesrc,$ffmpeg,$log)
+    $ignoretime = (Get-Date).AddHours(-1) # Check directory hasn't been writen too for an hour
+    
+    Get-ChildItem -Path $basesrc -Recurse -Directory -Exclude 'meta' | Where-Object { $_.PSIsContainer -and $_.LastWriteTime -lt $ignoretime } | ForEach-Object {
+    
+    $filelistParent= $_.FullName
+    $filelistPath = $_.FullName | Join-Path -ChildPath "filelist.txt"
+    $outputPath = $_.FullName | Join-Path -ChildPath "$output_prefix.mp4"
+    $sourcefiles = $_.FullName | Join-Path -ChildPath "*_?????????????_??????????_*.mp4"
+    $checkfile = $_.FullName | Join-Path -ChildPath ".complete"
+    
+    if (Test-Path "$checkfile") { 
+        Add-Content $log "Checkfile found, folder skipped ($filelistParent)"
+    } else { 
+        if (Test-Path "$sourcefiles") {
+            Add-Content $log "Sourcefiles found in $filelistParent"
+            if ((Test-Path "$filelistPath") -And (Test-Path "$outputPath")) { 
+                Add-Content $log "Do nothing in $filelistParent" 
+                } else {                
+                    Add-Content $log "Filelist or output missing in $filelistParent, generating filelist ($fileListPath)"
+                    Get-ChildItem -Path "$filelistParent" | Where-Object {$_.FullName -like $sourcefiles } | ForEach-Object { "file '" + $_.FullName + "'" } | Out-File -encoding ASCII "$FilelistPath"
+                    Add-Content $log "$FFMPEG called to concatinate the files sourced in filelist ($filelistParent) to $outputPath at $(Get-Date)"
+                
+                    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                    Invoke-Expression "$ffmpeg -nostats -loglevel 0 -threads 4 -auto_convert 1 -f concat -safe 0 -i '$filelistPath' -c copy '$outputPath'"
+                    $stopWatch.Stop()
+                    
+                    Add-Content $log "$Time elapsed for $outputPath was $($stopwatch.Elapsed.TotalMinutes.tostring("#.#")) Minutes"
+                
+                    echo $null >> $checkfile # Leave marker in directory to skip at next script run time               
+                }
+            }
+        }
+    }
+}
+
+# Execute backup based on flags 
+# If outputonly flag is true then only copy the resulting outputvideo file and ignore the soruce files, this is checked with a wildcard exclude pattern (.complete files are excluded to prevent rerun later)
+# If outputonly flag is false then copy all the source files including output to backup destination
+$backupFiles_block = {
+    param($basesrc,$basedst,$log,$outputonly)
+    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($outputonly) {
+        robocopy $basesrc $basedst /B /XX /MT:$threads /LOG+:$log /XJ /R:3 /NP /E /MOV /XD "temp" "meta" /XF "*_?????????????_??????????_*.mp4" ".complete"
+        } else {
+        robocopy $basesrc $basedst /B /XX /MT:$threads /LOG+:$log /XJ /R:3 /NP /E /XD "temp" 
+        }              
+    # /MT       # copies using multiple cores, good for many small files
+    # /XJ       # Ignoring junctions, they can cause infinite loops when recursing through folders
+    # /R:3      # Retrying a file only 3 times, we don't want bad permissions or other dumb stuff to halt the entire backup
+    # /LOG:$log # Logging to a file internally, the best way to log with the /MT flag
+    # /NP       # Removing progress from the log
+    # /E        # Recursively search from source directory
+    # /XX       # Ignore extra files in destination directory
+    $stopWatch.Stop()
+    Add-Content $log "Backup of directory is complete. [$src -> $dst] ($log) -  Elapsed time: $($stopwatch.Elapsed.TotalMinutes.tostring("#.#")) Minutes"
+}
+
+# Delete files older than variable set in $days and clean up the empty directories
+# This process is slow as it checks every file in the directory tree of the source and deletes anything older than $days
+# Then it'll find all the empty directories and prunes them too
+$deleteFiles_block = {
+    param($basesrc,$days,$log)
+    $currentDate = Get-Date
+    $datetoDelete = $currentDate.AddDays(-$days)
+
+    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    # Delete files older than days set in the source folder
+    Get-ChildItem -Path $basesrc -Recurse -File -Exclude 'temp' | Where-Object { $_.LastWriteTime -lt $datetoDelete } | Remove-Item -Recurse -Force -Verbose 2>&1 4>&1 | Add-Content $log
+    # Delete any empty directories left behind after deleting the old files.
+    Get-ChildItem -Path $basesrc -Recurse -Force -Exclude 'temp' | Where-Object { $_.PSIsContainer -and (Get-ChildItem -Path $_.FullName -Recurse -Force | Where-Object { !$_.PSIsContainer }) -eq $null } | Remove-Item -Force -Recurse -Verbose 2>&1 4>&1 | Add-Content $log
+    $stopWatch.Stop()
+    Add-Content $log "Deleted old files and cleaned up empty old directories - Elapsed time: $($stopwatch.Elapsed.TotalMinutes.tostring("#.#")) Minutes"
+}
+
+# Test flags for execution of the logic blocks
+if ($concat -eq $true) {
+    Add-Content $log "`r`n###### Concatinating video files found in $basesrc (excluding directories modified within the last hour) ...r`n"
+    Invoke-Command $processFiles_block -ArgumentList $basesrc,$ffmpeg,$log 
+    Add-Content $log "`r`n###### Processing complete ######r`n"
+    }
+
+if ($backup -eq $true) {
+    Add-Content $log "`r`n###### Backing up $basesrc -> $basedst ...r`n"    
+    Invoke-Command $backupFiles_block -ArgumentList $basesrc,$basedst,$log,$outputonly
+    Add-Content $log "`r`n###### Backup complete ######r`n"
+    }
+
+if ($delete -eq $true) {
+    # Backup one dir
+    Add-Content $log "`r`n###### Deleting old files from $basesrc ...r`n"
+    Invoke-Command $deleteFiles_block -ArgumentList $basesrc,$days,$log 
+    Add-Content $log "`r`n###### Deletion complete ######r`n"
+    }
