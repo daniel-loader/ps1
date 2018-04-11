@@ -16,9 +16,9 @@ Param(
     [string]$logdir = "C:\backuplogs", # Log folder
     [string]$ffmpeg = "C:\ffmpeg.exe", # Path to ffmpeg.exe 
 # Flags
-    [bool]$concat = $false, # Enable or disable concat with ffmpeg video output
-    [bool]$backup = $false, # If set to false, only create ffmpeg output files
-    [bool]$outputonly = $false, # Copy source and output files to destination or just the ffmpeg output
+    [bool]$concat = $true, # Enable or disable concat with ffmpeg video output
+    [bool]$backup = $true, # If set to false, only create ffmpeg output files
+    [bool]$outputonly = $true, # Copy source and output files to destination or just the ffmpeg output
     [bool]$delete = $true, # Enable or disable deletion of files marked older than above
 # Variables
     [int]$threads = "4", # Robocopy threadcount for copying (default is 8 for /MT copies, 2 prevents large file stalling, only use above 8 for local drives)
@@ -64,13 +64,13 @@ $processFiles_block = {
         Add-Content $log "Checkfile found, folder skipped ($filelistParent)"
     } else { 
         if (Test-Path "$sourcefiles") {
-            Add-Content $log "Sourcefiles found in $filelistParent"
+            Add-Content $log "Checkfile not found, sourcefiles found ($filelistParent)"
             if ((Test-Path "$filelistPath") -And (Test-Path "$outputPath")) { 
                 Add-Content $log "Do nothing in $filelistParent" 
                 } else {                
                     Add-Content $log "Filelist or output missing in $filelistParent, generating filelist ($fileListPath)"
                     Get-ChildItem -Path "$filelistParent" | Where-Object {$_.FullName -like $sourcefiles } | ForEach-Object { "file '" + $_.FullName + "'" } | Out-File -encoding ASCII "$FilelistPath"
-                    Add-Content $log "$FFMPEG called to concatinate the files sourced in filelist ($filelistParent) to $outputPath at $(Get-Date)"
+                    Add-Content $log "$FFMPEG called to concatenate the files sourced in filelist ($filelistParent) to $outputPath at $(Get-Date)"
                 
                     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
                     Invoke-Expression "$ffmpeg -nostats -loglevel 0 -threads 4 -auto_convert 1 -f concat -safe 0 -i '$filelistPath' -c copy '$outputPath'"
